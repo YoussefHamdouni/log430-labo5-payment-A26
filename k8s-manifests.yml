@@ -1,0 +1,192 @@
+# ============================================================
+# Service de paiement (payments-api) + sa base de données (mysql-payments)
+# Grappe Kubernetes du cours LOG430 — voir kubernetes.md dans log430-labo5
+#
+# Déploiement (après connexion au VPN et configuration de kubectl) :
+#   kubectl create configmap payments-db-init --from-file=./db-init/ \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -f k8s-manifests.yml
+#   kubectl rollout status deployment/payments-api
+#
+# Contraintes de la grappe respectées :
+#   - noms RFC 1123 (tirets, pas d'underscores) : payments-api, mysql-payments
+#   - noms distincts de ceux du Store Manager (même espace de noms) :
+#     payments-config, payments-db-secret, payments-db-init, mysql-payments-pvc
+#   - pas de storageClassName (classe par défaut de la grappe)
+#   - pas de nodePort imposé ; payments-api est interne (ClusterIP),
+#     on y accède par KrakenD (api-gateway) : http://payments-api:5009
+# ============================================================
+
+# ------------------------------------------------------------
+# ConfigMap : configuration non sensible de l'application
+# ------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-config
+  labels:
+    app: payments-api
+data:
+  DB_HOST: mysql-payments
+  DB_PORT: "3306"
+  DB_NAME: labo05_payments_db
+
+---
+# ------------------------------------------------------------
+# Secret : identifiants de la base de données
+# (mêmes valeurs de développement que docker-compose.yml)
+# ------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payments-db-secret
+  labels:
+    app: mysql-payments
+type: Opaque
+stringData:
+  DB_USER: labo05
+  DB_PASSWORD: labo05
+  MYSQL_ROOT_PASSWORD: root
+
+---
+# ------------------------------------------------------------
+# MySQL du service de paiement
+# ------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-payments-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-payments
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # un seul pod à la fois sur le volume ReadWriteOnce
+  selector:
+    matchLabels:
+      app: mysql-payments
+  template:
+    metadata:
+      labels:
+        app: mysql-payments
+    spec:
+      containers:
+        - name: mysql-payments
+          image: mysql:8.4.7
+          env:
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef: { name: payments-config, key: DB_NAME }
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef: { name: payments-db-secret, key: DB_USER }
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: payments-db-secret, key: DB_PASSWORD }
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: payments-db-secret, key: MYSQL_ROOT_PASSWORD }
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: db-init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -u root -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -u root -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-payments-pvc
+        - name: db-init
+          configMap:
+            name: payments-db-init
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-payments
+spec:
+  selector:
+    app: mysql-payments
+  ports:
+    - port: 3306
+      targetPort: 3306
+
+---
+# ------------------------------------------------------------
+# payments-api (image publiée sur GHCR par .github/workflows/docker-publish.yml)
+# ------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      containers:
+        - name: payments-api
+          image: ghcr.io/youssefhamdouni/log430-labo5-payment-a26:latest
+          imagePullPolicy: Always
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          envFrom:
+            - configMapRef:
+                name: payments-config
+            - secretRef:
+                name: payments-db-secret
+          ports:
+            - containerPort: 5009
+          readinessProbe:
+            httpGet: { path: /, port: 5009 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 5009 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 250m, memory: 256Mi }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+spec:
+  selector:
+    app: payments-api
+  ports:
+    - port: 5009
+      targetPort: 5009
