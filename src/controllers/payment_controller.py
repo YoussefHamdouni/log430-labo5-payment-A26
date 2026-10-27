@@ -41,8 +41,8 @@ def process_payment(payment_id, credit_card_data):
         "payment_id": update_result["payment_id"],
         "is_paid": update_result["is_paid"]
     }
-    # TODO: appelez la méthode correctement
-    update_order(0, False)
+    if result["is_paid"]:
+        update_order(result["order_id"], result["is_paid"])
 
     return result
     
@@ -54,4 +54,14 @@ def _process_credit_card_payment(payment_data):
 
 def update_order(order_id, is_paid):
     """ Trigger order update once it is paid"""
-    pass
+    # On passe par KrakenD (voir config/krakend.json dans log430-labo5) et non directement par le Store Manager
+    response = requests.put('http://api-gateway:8080/store-manager-api/orders',
+        json={"order_id": order_id, "is_paid": is_paid},
+        headers={'Content-Type': 'application/json'}
+    )
+
+    if response.ok:
+        logger.debug(f"Commande {order_id} mise à jour dans le Store Manager : {response.json()}")
+    else:
+        logger.error(f"Échec de la mise à jour de la commande {order_id} : {response.status_code} {response.text}")
+    return response.ok
