@@ -3,12 +3,26 @@ Mock Payment Microservice using Flask
 SPDX - License - Identifier: LGPL - 3.0 - or -later
 Auteurs : Gabriel C. Ullmann, Fabio Petrillo, 2025
 """
+import config
 from logger import Logger
 from flask import Flask, request, jsonify
 from controllers.payment_controller import add_payment, process_payment, get_payment
+from event_management.handler_registry import HandlerRegistry
+from stocks.handlers.stock_decreased_handler import StockDecreasedHandler
+from orders.queries.order_event_consumer import OrderEventConsumer
 
 app = Flask(__name__)
 logger = Logger.get_instance("payments")
+
+registry = HandlerRegistry()
+registry.register(StockDecreasedHandler())
+consumer_service = OrderEventConsumer(
+    bootstrap_servers=config.KAFKA_HOST,
+    topic=config.KAFKA_TOPIC,
+    group_id=config.KAFKA_GROUP_ID,
+    registry=registry
+)
+consumer_service.start()
 
 @app.route("/")
 def home():
